@@ -1634,7 +1634,6 @@ export default function Home() {
                         autoPlay
                         playsInline
                         muted={false}
-                        volume={1.0}
                         className="w-full h-full object-cover"
                       />
                       {!hasVideo && (
