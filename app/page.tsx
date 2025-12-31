@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { createRoom, joinRoom, subscribeToRoom, leaveRoom, sendChatMessage, subscribeToChat, generateUserId, type RoomData, type User, type ChatMessage } from '@/lib/room'
 
 interface TimeLeft {
   days: number
@@ -62,6 +63,26 @@ export default function Home() {
   const lastSoundTimeRef = useRef<number>(0)
   const lastCountdownNumberRef = useRef<number>(-1)
   const rocketLaunchSoundPlayedRef = useRef<boolean>(false)
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null)
+  
+  // Room state
+  const [roomId, setRoomId] = useState<string | null>(null)
+  const [roomCode, setRoomCode] = useState<string | null>(null)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [isHost, setIsHost] = useState(false)
+  const [roomUsers, setRoomUsers] = useState<User[]>([])
+  const [showRoomModal, setShowRoomModal] = useState(true)
+  const [roomAction, setRoomAction] = useState<'create' | 'join' | null>(null)
+  const [userName, setUserName] = useState('')
+  const [joinCode, setJoinCode] = useState('')
+  const [roomTargetDate, setRoomTargetDate] = useState<number | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  
+  // Chat state
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [showChat, setShowChat] = useState(true)
 
   // Surprise messages - randomly selected
   const surpriseMessages = [
@@ -82,9 +103,11 @@ export default function Home() {
   
   // Target date: January 1, 2026, 00:00:00 (production)
   // Or test date if TEST_MODE is enabled
-  const targetDate = TEST_MODE 
+  // Use room target date if in a room, otherwise use default
+  const defaultTargetDate = TEST_MODE 
     ? new Date(TEST_TARGET_DATE).getTime()
     : new Date('2026-01-01T00:00:00').getTime()
+  const targetDate = roomTargetDate || defaultTargetDate
 
   // Function to play rocket launch sound
   const playRocketLaunchSound = useCallback(() => {
@@ -156,6 +179,181 @@ export default function Home() {
     }
   }, [])
 
+  // Room management functions
+  const handleCreateRoom = async () => {
+    if (!userName.trim()) {
+      setErrorMessage('Please enter your name')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
+    
+    setIsLoading(true)
+    setErrorMessage(null)
+    
+    try {
+      console.log('Creating room with targetDate:', targetDate)
+      const result = await createRoom(targetDate, userName.trim())
+      console.log('Room created successfully:', result)
+      setRoomId(result.roomId)
+      setRoomCode(result.roomCode)
+      setUserId(result.userId)
+      setIsHost(true)
+      setShowRoomModal(false)
+    } catch (error: any) {
+      console.error('Failed to create room:', error)
+      console.error('Full error object:', error)
+      const errorMsg = error?.message || 'Failed to create room. Please check your Firebase configuration and try again.'
+      setErrorMessage(errorMsg)
+      // Don't show alert, just show error in UI
+      console.error('Error message:', errorMsg)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+  
+  const handleJoinRoom = async () => {
+    if (!userName.trim()) {
+      setErrorMessage('Please enter your name')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
+    if (!joinCode.trim() || joinCode.trim().length !== 6) {
+      setErrorMessage('Please enter a valid 6-character room code')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
+    
+    setIsLoading(true)
+    setErrorMessage(null)
+    
+    try {
+      console.log('Joining room with code:', joinCode.trim().toUpperCase())
+      const result = await joinRoom(joinCode.trim().toUpperCase(), userName.trim())
+      if (result) {
+        console.log('Joined room successfully:', result)
+        setRoomId(result.roomId)
+        setRoomCode(joinCode.trim().toUpperCase())
+        setUserId(result.userId)
+        setIsHost(false)
+        setShowRoomModal(false)
+      }
+    } catch (error: any) {
+      console.error('Failed to join room:', error)
+      const errorMsg = error?.message || 'Failed to join room. Please check the room code and try again.'
+      setErrorMessage(errorMsg)
+      alert(`Failed to join room: ${errorMsg}\n\nCheck the browser console for more details.`)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+  
+  const handleLeaveRoom = async () => {
+    if (roomId && userId) {
+      try {
+        await leaveRoom(roomId, userId)
+      } catch (error) {
+        console.error('Failed to leave room:', error)
+      }
+    }
+    setRoomId(null)
+    setRoomCode(null)
+    setUserId(null)
+    setIsHost(false)
+    setRoomUsers([])
+    setRoomTargetDate(null)
+    setShowRoomModal(true)
+    setRoomAction(null)
+  }
+  
+  // Subscribe to room updates
+  useEffect(() => {
+    if (!roomId || !userId) return
+    
+    let isSubscribed = true
+    
+    const unsubscribe = subscribeToRoom(roomId, (room: RoomData | null, users: User[]) => {
+      if (!isSubscribed) return // Prevent updates after unmount
+      
+      try {
+        if (room) {
+          // Only update if users array is valid
+          if (Array.isArray(users)) {
+            setRoomUsers(users)
+          } else {
+            console.warn('Invalid users data:', users)
+            setRoomUsers([])
+          }
+          
+          // Check if current user is the host
+          setIsHost(room.hostId === userId)
+          
+          // Update target date from room if it exists
+          if (room.targetDate) {
+            setRoomTargetDate(room.targetDate)
+          }
+        } else {
+          // Room was deleted
+          console.log('Room was deleted, leaving...')
+          handleLeaveRoom()
+        }
+      } catch (error) {
+        console.error('Error in room subscription callback:', error)
+      }
+    })
+    
+    return () => {
+      isSubscribed = false
+      unsubscribe()
+    }
+  }, [roomId, userId])
+  
+  // Subscribe to chat messages
+  useEffect(() => {
+    if (!roomId) return
+    
+    const unsubscribe = subscribeToChat(roomId, (messages: ChatMessage[]) => {
+      setChatMessages(messages)
+    })
+    
+    return () => {
+      unsubscribe()
+    }
+  }, [roomId])
+  
+  // Auto-scroll chat to bottom when messages change
+  useEffect(() => {
+    if (chatMessagesEndRef.current && showChat) {
+      chatMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [chatMessages, showChat])
+  
+  // Handle sending chat message
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !roomId || !userId || !userName) return
+    
+    try {
+      await sendChatMessage(roomId, userId, userName, chatInput)
+      setChatInput('')
+      // Scroll to bottom after sending
+      setTimeout(() => {
+        if (chatMessagesEndRef.current) {
+          chatMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' })
+        }
+      }, 100)
+    } catch (error) {
+      console.error('Failed to send message:', error)
+    }
+  }
+  
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (roomId && userId) {
+        leaveRoom(roomId, userId).catch(console.error)
+      }
+    }
+  }, [])
+  
   // Function to play firework sound - uses only /sound/firework-sound.webm
   // Throttled to prevent too many sounds
   const playFireworkSound = useCallback((type: 'normal' | 'big' = 'normal') => {
@@ -759,6 +957,275 @@ export default function Home() {
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-gradient-to-b from-black via-purple-900 to-black flex items-center justify-center">
+      {/* Room Modal */}
+      {showRoomModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-gradient-to-br from-purple-900/90 to-black/90 rounded-2xl p-8 max-w-md w-full border border-purple-500/30 shadow-2xl">
+            <h2 className="text-3xl font-bold text-center mb-6 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-pink-500 to-purple-500">
+              🎉 Welcome to 2026 Countdown! 🎉
+            </h2>
+            
+            {!roomAction ? (
+              <div className="space-y-4">
+                <p className="text-center text-gray-300 text-sm mb-2">
+                  Choose how you want to celebrate:
+                </p>
+                <div className="flex gap-4">
+                  <button
+                    onClick={() => setRoomAction('create')}
+                    className="flex-1 px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold text-white hover:from-purple-500 hover:to-pink-500 transition-all transform hover:scale-105"
+                  >
+                    Create Room
+                  </button>
+                  <button
+                    onClick={() => setRoomAction('join')}
+                    className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg font-semibold text-white hover:from-blue-500 hover:to-purple-500 transition-all transform hover:scale-105"
+                  >
+                    Join Room
+                  </button>
+                </div>
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-600"></div>
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-purple-900/90 px-2 text-gray-400">or</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowRoomModal(false)}
+                  className="w-full px-6 py-3 bg-gray-700/50 hover:bg-gray-700 rounded-lg font-semibold text-white transition-all border border-gray-600 hover:border-gray-500"
+                >
+                  Countdown Alone ✨
+                </button>
+                <p className="text-center text-gray-400 text-xs">
+                  You can always join or create a room later
+                </p>
+              </div>
+            ) : roomAction === 'create' ? (
+              <div className="space-y-4">
+                <input
+                  type="text"
+                  placeholder="Enter your name"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  disabled={isLoading}
+                  className="w-full px-4 py-3 rounded-lg bg-purple-800/50 border border-purple-500/50 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                {errorMessage && (
+                  <div className="px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm">
+                    {errorMessage}
+                  </div>
+                )}
+                <button
+                  onClick={handleCreateRoom}
+                  disabled={isLoading}
+                  className="w-full px-6 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold text-white hover:from-purple-500 hover:to-pink-500 transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                >
+                  {isLoading ? 'Creating Room...' : 'Create & Start'}
+                </button>
+                <button
+                  onClick={() => {
+                    setRoomAction(null)
+                    setErrorMessage(null)
+                  }}
+                  disabled={isLoading}
+                  className="w-full px-6 py-3 bg-gray-700 rounded-lg font-semibold text-white hover:bg-gray-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Back
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <input
+                  type="text"
+                  placeholder="Enter your name"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  disabled={isLoading}
+                  className="w-full px-4 py-3 rounded-lg bg-purple-800/50 border border-purple-500/50 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                <input
+                  type="text"
+                  placeholder="Enter 6-digit room code"
+                  value={joinCode}
+                  onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                  maxLength={6}
+                  disabled={isLoading}
+                  className="w-full px-4 py-3 rounded-lg bg-purple-800/50 border border-purple-500/50 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 text-center text-2xl font-bold tracking-widest disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                {errorMessage && (
+                  <div className="px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-sm">
+                    {errorMessage}
+                  </div>
+                )}
+                <button
+                  onClick={handleJoinRoom}
+                  disabled={isLoading}
+                  className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg font-semibold text-white hover:from-blue-500 hover:to-purple-500 transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                >
+                  {isLoading ? 'Joining Room...' : 'Join Room'}
+                </button>
+                <button
+                  onClick={() => {
+                    setRoomAction(null)
+                    setErrorMessage(null)
+                  }}
+                  disabled={isLoading}
+                  className="w-full px-6 py-3 bg-gray-700 rounded-lg font-semibold text-white hover:bg-gray-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Back
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      
+      {/* Room Info Bar */}
+      {roomId && !showRoomModal && (
+        <div className="fixed top-4 left-4 right-4 z-50 flex items-center justify-between bg-black/70 backdrop-blur-sm rounded-lg p-4 border border-purple-500/30">
+          <div className="flex items-center gap-4">
+            <div>
+              <div className="text-sm text-gray-400">Room Code</div>
+              <div className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-pink-500">
+                {roomCode}
+              </div>
+            </div>
+            <div className="h-8 w-px bg-purple-500/50"></div>
+            <div>
+              <div className="text-sm text-gray-400">Users in Room</div>
+              <div className="text-lg font-semibold text-white">
+                {roomUsers.length} {roomUsers.length === 1 ? 'person' : 'people'}
+              </div>
+            </div>
+            {isHost && (
+              <>
+                <div className="h-8 w-px bg-purple-500/50"></div>
+                <div className="px-3 py-1 bg-purple-600/50 rounded-full text-sm text-purple-200">
+                  👑 Host
+                </div>
+              </>
+            )}
+          </div>
+          <button
+            onClick={handleLeaveRoom}
+            className="px-4 py-2 bg-red-600/50 hover:bg-red-600 rounded-lg text-white font-semibold transition-all"
+          >
+            Leave Room
+          </button>
+        </div>
+      )}
+      
+      {/* Chat Panel (bottom left) */}
+      {roomId && !showRoomModal && (
+        <div className="fixed bottom-4 left-4 z-50 w-80 bg-black/80 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl flex flex-col max-h-96">
+          {/* Chat Header */}
+          <div className="flex items-center justify-between p-3 border-b border-purple-500/30">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">💬</span>
+              <h3 className="text-sm font-semibold text-white">Room Chat</h3>
+            </div>
+            <button
+              onClick={() => setShowChat(!showChat)}
+              className="text-gray-400 hover:text-white transition-colors text-sm"
+            >
+              {showChat ? '▼' : '▲'}
+            </button>
+          </div>
+          
+          {/* Chat Messages */}
+          {showChat && (
+            <>
+              <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0" style={{ maxHeight: '240px' }}>
+                {chatMessages.length === 0 ? (
+                  <div className="text-center text-gray-400 text-sm py-4">
+                    No messages yet. Start chatting! 💬
+                  </div>
+                ) : (
+                  <>
+                    {chatMessages.map((msg) => (
+                      <div
+                        key={msg.id}
+                        className={`flex flex-col ${
+                          msg.userId === userId ? 'items-end' : 'items-start'
+                        }`}
+                      >
+                        <div className="text-xs text-gray-400 mb-1">
+                          {msg.userId === userId ? 'You' : msg.userName}
+                          {msg.userId === userId && isHost && ' 👑'}
+                        </div>
+                        <div
+                          className={`max-w-[75%] rounded-lg px-3 py-2 text-sm break-words ${
+                            msg.userId === userId
+                              ? 'bg-purple-600/70 text-white'
+                              : 'bg-purple-800/50 text-gray-200'
+                          }`}
+                        >
+                          {msg.message}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                      </div>
+                    ))}
+                    {/* Invisible element at the end to scroll to */}
+                    <div ref={chatMessagesEndRef} />
+                  </>
+                )}
+              </div>
+              
+              {/* Chat Input */}
+              <div className="p-3 border-t border-purple-500/30">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        handleSendMessage()
+                      }
+                    }}
+                    placeholder="Type a message..."
+                    className="flex-1 px-3 py-2 rounded-lg bg-purple-800/50 border border-purple-500/50 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+                  />
+                  <button
+                    onClick={handleSendMessage}
+                    disabled={!chatInput.trim()}
+                    className="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold text-white hover:from-purple-500 hover:to-pink-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                  >
+                    Send
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      
+      {/* Users List (floating) */}
+      {roomId && !showRoomModal && roomUsers.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-50 bg-black/70 backdrop-blur-sm rounded-lg p-4 border border-purple-500/30 max-w-xs">
+          <div className="text-sm font-semibold text-gray-300 mb-2">People in Room:</div>
+          <div className="space-y-1 max-h-40 overflow-y-auto">
+            {roomUsers.map((user) => (
+              <div
+                key={user.id}
+                className={`text-sm py-1 px-2 rounded ${
+                  user.id === userId
+                    ? 'bg-purple-600/50 text-purple-200'
+                    : 'text-gray-300'
+                }`}
+              >
+                {user.name} {user.id === userId && '(You)'}
+                {isHost && user.id === userId && ' 👑'}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Glowing orbs background - more intense during last minute */}
       <div className="absolute inset-0 overflow-hidden">
         <div className={`absolute top-20 left-10 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl animate-blob ${
