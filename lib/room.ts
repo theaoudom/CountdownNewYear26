@@ -1,4 +1,4 @@
-import { ref, set, onValue, off, push, remove, update, serverTimestamp } from 'firebase/database'
+import { ref, set, onValue, off, push, remove, update, serverTimestamp, get } from 'firebase/database'
 import { database } from './firebase'
 
 export interface RoomData {
@@ -133,27 +133,59 @@ export async function joinRoom(roomCode: string, userName: string): Promise<{ ro
         }
         
         const [roomId, roomData] = roomEntry as [string, RoomData]
-        const userId = generateUserId()
         
-        // Unsubscribe immediately to prevent multiple calls
-        if (unsubscribe) {
-          unsubscribe()
-          unsubscribe = null
-        }
-        resolved = true
+        // Check if user with same name already exists in the room
+        const roomUsersRef = ref(database, `rooms/${roomId}/users`)
         
-        // Add user to room
-        set(ref(database, `rooms/${roomId}/users/${userId}`), {
-          id: userId,
-          name: userName || `User ${userId.slice(-4)}`,
-          joinedAt: Date.now(),
+        // Use get() to check for existing users with same name
+        get(roomUsersRef).then((usersSnapshot) => {
+          const users = usersSnapshot.val()
+          
+          if (users) {
+            // Check if a user with the same name already exists
+            const userEntries = Object.entries(users) as [string, any][]
+            const existingUser = userEntries.find(
+              ([_, user]: [string, any]) => user && user.name === userName
+            )
+            
+            if (existingUser) {
+              // Unsubscribe before rejecting
+              if (unsubscribe) {
+                unsubscribe()
+                unsubscribe = null
+              }
+              resolved = true
+              reject(new Error(`Name "${userName}" is already taken. Please use a different name.`))
+              return
+            }
+          }
+          
+          // Unsubscribe immediately to prevent multiple calls
+          if (unsubscribe) {
+            unsubscribe()
+            unsubscribe = null
+          }
+          resolved = true
+          
+          // Generate new user ID since name is unique
+          const userId = generateUserId()
+          
+          // Add user to room
+          set(ref(database, `rooms/${roomId}/users/${userId}`), {
+            id: userId,
+            name: userName || `User ${userId.slice(-4)}`,
+            joinedAt: Date.now(),
+          })
+            .then(() => {
+              resolve({ roomId, userId })
+            })
+            .catch((error) => {
+              reject(error)
+            })
+        }).catch((error) => {
+          if (unsubscribe) unsubscribe()
+          reject(error)
         })
-          .then(() => {
-            resolve({ roomId, userId })
-          })
-          .catch((error) => {
-            reject(error)
-          })
       } catch (error) {
         if (unsubscribe) unsubscribe()
         reject(error)
@@ -235,6 +267,27 @@ export async function leaveRoom(roomId: string, userId: string): Promise<void> {
 // Update room target date (host only)
 export async function updateRoomTargetDate(roomId: string, targetDate: number): Promise<void> {
   await update(ref(database, `rooms/${roomId}`), { targetDate })
+}
+
+// Kick a user from room (host only)
+export async function kickUser(roomId: string, targetUserId: string, hostId: string): Promise<void> {
+  // Verify host before kicking
+  const roomRef = ref(database, `rooms/${roomId}`)
+  const roomSnapshot = await get(roomRef)
+  const roomData = roomSnapshot.val()
+  
+  if (!roomData || roomData.hostId !== hostId) {
+    throw new Error('Only the room host can kick users')
+  }
+  
+  // Don't allow host to kick themselves
+  if (targetUserId === hostId) {
+    throw new Error('Host cannot kick themselves')
+  }
+  
+  // Remove the user
+  const userRef = ref(database, `rooms/${roomId}/users/${targetUserId}`)
+  await remove(userRef)
 }
 
 // Send a chat message

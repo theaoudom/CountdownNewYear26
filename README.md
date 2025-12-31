@@ -112,6 +112,3 @@ Celebrate the New Year with friends and family! Create rooms, chat together, and
 ---
 
 **Happy New Year 2026! 🎊🎆✨**
-
-
-

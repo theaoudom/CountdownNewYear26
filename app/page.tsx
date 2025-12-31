@@ -1,7 +1,10 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { createRoom, joinRoom, subscribeToRoom, leaveRoom, sendChatMessage, subscribeToChat, generateUserId, type RoomData, type User, type ChatMessage } from '@/lib/room'
+import { createRoom, joinRoom, subscribeToRoom, leaveRoom, kickUser, sendChatMessage, subscribeToChat, generateUserId, type RoomData, type User, type ChatMessage } from '@/lib/room'
+import { commonEmojis } from '@/lib/emojis'
+import { database } from '@/lib/firebase'
+import { ref, get, update } from 'firebase/database'
 
 interface TimeLeft {
   days: number
@@ -79,10 +82,92 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   
+  // Save room data to localStorage
+  const saveRoomData = useCallback((data: { roomId: string; roomCode: string; userId: string; userName: string }) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('welcome2026_room', JSON.stringify(data))
+    }
+  }, [])
+  
+  // Load room data from localStorage
+  const loadRoomData = useCallback((): { roomId: string; roomCode: string; userId: string; userName: string } | null => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('welcome2026_room')
+      if (saved) {
+        try {
+          return JSON.parse(saved)
+        } catch (e) {
+          console.error('Failed to parse saved room data:', e)
+          localStorage.removeItem('welcome2026_room')
+        }
+      }
+    }
+    return null
+  }, [])
+  
+  // Clear room data from localStorage
+  const clearRoomData = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('welcome2026_room')
+    }
+  }, [])
+  
+  // Restore room connection on page load
+  useEffect(() => {
+    const restoreRoom = async () => {
+      const savedData = loadRoomData()
+      if (!savedData) return
+      
+      const { roomId: savedRoomId, roomCode: savedRoomCode, userId: savedUserId, userName: savedUserName } = savedData
+      
+      // Verify user is still in the room
+      try {
+        const roomRef = ref(database, `rooms/${savedRoomId}`)
+        const roomSnapshot = await get(roomRef)
+        const roomData = roomSnapshot.val()
+        
+        if (!roomData || !roomData.isActive) {
+          // Room doesn't exist or is inactive
+          clearRoomData()
+          return
+        }
+        
+        // Check if user still exists in room
+        const usersRef = ref(database, `rooms/${savedRoomId}/users/${savedUserId}`)
+        const userSnapshot = await get(usersRef)
+        const userData = userSnapshot.val()
+        
+        if (!userData) {
+          // User was removed from room
+          clearRoomData()
+          return
+        }
+        
+        // Restore room connection
+        setRoomId(savedRoomId)
+        setRoomCode(savedRoomCode)
+        setUserId(savedUserId)
+        setUserName(savedUserName)
+        setShowRoomModal(false)
+        
+        // Update user's joinedAt timestamp to show they're active
+        await update(ref(database, `rooms/${savedRoomId}/users/${savedUserId}`), {
+          joinedAt: Date.now(),
+        })
+      } catch (error) {
+        console.error('Failed to restore room:', error)
+        clearRoomData()
+      }
+    }
+    
+    restoreRoom()
+  }, [loadRoomData, clearRoomData])
+  
   // Chat state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
   const [showChat, setShowChat] = useState(true)
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false)
 
   // Surprise messages - randomly selected
   const surpriseMessages = [
@@ -199,6 +284,14 @@ export default function Home() {
       setUserId(result.userId)
       setIsHost(true)
       setShowRoomModal(false)
+      
+      // Save room data to localStorage
+      saveRoomData({
+        roomId: result.roomId,
+        roomCode: result.roomCode,
+        userId: result.userId,
+        userName: userName.trim(),
+      })
     } catch (error: any) {
       console.error('Failed to create room:', error)
       console.error('Full error object:', error)
@@ -236,12 +329,19 @@ export default function Home() {
         setUserId(result.userId)
         setIsHost(false)
         setShowRoomModal(false)
+        
+        // Save room data to localStorage
+        saveRoomData({
+          roomId: result.roomId,
+          roomCode: joinCode.trim().toUpperCase(),
+          userId: result.userId,
+          userName: userName.trim(),
+        })
       }
     } catch (error: any) {
       console.error('Failed to join room:', error)
       const errorMsg = error?.message || 'Failed to join room. Please check the room code and try again.'
       setErrorMessage(errorMsg)
-      alert(`Failed to join room: ${errorMsg}\n\nCheck the browser console for more details.`)
     } finally {
       setIsLoading(false)
     }
@@ -263,6 +363,9 @@ export default function Home() {
     setRoomTargetDate(null)
     setShowRoomModal(true)
     setRoomAction(null)
+    
+    // Clear room data from localStorage
+    clearRoomData()
   }
   
   // Subscribe to room updates
@@ -327,6 +430,21 @@ export default function Home() {
     }
   }, [chatMessages, showChat])
   
+  // Close emoji picker when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (showEmojiPicker && !target.closest('.emoji-picker-container')) {
+        setShowEmojiPicker(false)
+      }
+    }
+    
+    if (showEmojiPicker) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showEmojiPicker])
+  
   // Handle sending chat message
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !roomId || !userId || !userName) return
@@ -334,6 +452,7 @@ export default function Home() {
     try {
       await sendChatMessage(roomId, userId, userName, chatInput)
       setChatInput('')
+      setShowEmojiPicker(false)
       // Scroll to bottom after sending
       setTimeout(() => {
         if (chatMessagesEndRef.current) {
@@ -343,6 +462,12 @@ export default function Home() {
     } catch (error) {
       console.error('Failed to send message:', error)
     }
+  }
+  
+  // Handle emoji selection
+  const handleEmojiClick = (emoji: string) => {
+    setChatInput(prev => prev + emoji)
+    setShowEmojiPicker(false)
   }
   
   // Cleanup on unmount
@@ -1119,7 +1244,7 @@ export default function Home() {
       
       {/* Chat Panel (bottom left) */}
       {roomId && !showRoomModal && (
-        <div className="fixed bottom-4 left-4 z-50 w-80 bg-black/80 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl flex flex-col max-h-96">
+        <div className="fixed bottom-4 left-4 z-50 w-80 bg-black/80 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl flex flex-col max-h-96 overflow-hidden">
           {/* Chat Header */}
           <div className="flex items-center justify-between p-3 border-b border-purple-500/30">
             <div className="flex items-center gap-2">
@@ -1176,8 +1301,33 @@ export default function Home() {
               </div>
               
               {/* Chat Input */}
-              <div className="p-3 border-t border-purple-500/30">
-                <div className="flex gap-2">
+              <div className="p-3 border-t border-purple-500/30 relative emoji-picker-container flex-shrink-0">
+                {/* Emoji Picker */}
+                {showEmojiPicker && (
+                  <div className="absolute bottom-full left-0 mb-2 bg-black/90 backdrop-blur-sm rounded-lg border border-purple-500/50 p-3 w-full max-h-48 overflow-y-auto shadow-2xl z-10">
+                    <div className="grid grid-cols-8 gap-2">
+                      {commonEmojis.map((emoji, index) => (
+                        <button
+                          key={index}
+                          onClick={() => handleEmojiClick(emoji)}
+                          className="text-2xl hover:bg-purple-600/50 rounded p-1 transition-colors cursor-pointer"
+                          title={emoji}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                <div className="flex gap-2 items-center">
+                  <button
+                    onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                    className="flex-shrink-0 px-2.5 py-2 bg-purple-700/50 hover:bg-purple-600/50 rounded-lg text-lg transition-colors"
+                    title="Add emoji"
+                  >
+                    😀
+                  </button>
                   <input
                     type="text"
                     value={chatInput}
@@ -1188,13 +1338,14 @@ export default function Home() {
                         handleSendMessage()
                       }
                     }}
+                    onFocus={() => setShowEmojiPicker(false)}
                     placeholder="Type a message..."
-                    className="flex-1 px-3 py-2 rounded-lg bg-purple-800/50 border border-purple-500/50 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+                    className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-purple-800/50 border border-purple-500/50 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
                   />
                   <button
                     onClick={handleSendMessage}
                     disabled={!chatInput.trim()}
-                    className="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold text-white hover:from-purple-500 hover:to-pink-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                    className="flex-shrink-0 px-3 py-2 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold text-white hover:from-purple-500 hover:to-pink-500 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm whitespace-nowrap"
                   >
                     Send
                   </button>
@@ -1213,14 +1364,34 @@ export default function Home() {
             {roomUsers.map((user) => (
               <div
                 key={user.id}
-                className={`text-sm py-1 px-2 rounded ${
+                className={`flex items-center justify-between text-sm py-1 px-2 rounded ${
                   user.id === userId
                     ? 'bg-purple-600/50 text-purple-200'
                     : 'text-gray-300'
                 }`}
               >
-                {user.name} {user.id === userId && '(You)'}
-                {isHost && user.id === userId && ' 👑'}
+                <span>
+                  {user.name} {user.id === userId && '(You)'}
+                  {isHost && user.id === userId && ' 👑'}
+                </span>
+                {isHost && user.id !== userId && (
+                  <button
+                    onClick={async () => {
+                      if (roomId && userId) {
+                        try {
+                          await kickUser(roomId, user.id, userId)
+                        } catch (error) {
+                          console.error('Failed to kick user:', error)
+                          setErrorMessage(error instanceof Error ? error.message : 'Failed to kick user')
+                        }
+                      }
+                    }}
+                    className="ml-2 text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/20 transition-colors"
+                    title="Kick user"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
             ))}
           </div>
