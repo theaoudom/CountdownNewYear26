@@ -5,6 +5,7 @@ import { createRoom, joinRoom, subscribeToRoom, leaveRoom, kickUser, sendChatMes
 import { commonEmojis } from '@/lib/emojis'
 import { database } from '@/lib/firebase'
 import { ref, get, update } from 'firebase/database'
+import { WebRTCManager, type CallState } from '@/lib/webrtc'
 
 interface TimeLeft {
   days: number
@@ -171,6 +172,16 @@ export default function Home() {
   
   // Users list state
   const [showUsersList, setShowUsersList] = useState(true)
+  const [showRoomActionsMenu, setShowRoomActionsMenu] = useState(false)
+
+  // Call state
+  const [callState, setCallState] = useState<CallState | null>(null)
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map())
+  const [showCallModal, setShowCallModal] = useState(false)
+  const [callType, setCallType] = useState<'audio' | 'video' | null>(null)
+  const webrtcManagerRef = useRef<WebRTCManager | null>(null)
+  const localVideoRef = useRef<HTMLVideoElement>(null)
+  const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
 
   // Surprise messages - randomly selected
   const surpriseMessages = [
@@ -351,6 +362,11 @@ export default function Home() {
   }
   
   const handleLeaveRoom = async () => {
+    // End call if active
+    if (webrtcManagerRef.current && callState?.isInCall) {
+      await handleEndCall()
+    }
+    
     if (roomId && userId) {
       try {
         await leaveRoom(roomId, userId)
@@ -447,6 +463,21 @@ export default function Home() {
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
   }, [showEmojiPicker])
+
+  // Close room actions menu when clicking outside (mobile)
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (showRoomActionsMenu && !target.closest('.room-actions-container')) {
+        setShowRoomActionsMenu(false)
+      }
+    }
+    
+    if (showRoomActionsMenu) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showRoomActionsMenu])
   
   // Handle sending chat message
   const handleSendMessage = async () => {
@@ -473,13 +504,105 @@ export default function Home() {
     setShowEmojiPicker(false)
   }
   
+  // Initialize WebRTC manager when in a room
+  useEffect(() => {
+    if (roomId && userId && !webrtcManagerRef.current) {
+      webrtcManagerRef.current = new WebRTCManager(roomId, userId)
+      
+      webrtcManagerRef.current.onStateChange((state) => {
+        setCallState(state)
+      })
+      
+      webrtcManagerRef.current.onRemoteStream((userId, stream) => {
+        setRemoteStreams(prev => {
+          const newMap = new Map(prev)
+          newMap.set(userId, stream)
+          return newMap
+        })
+        
+        // Update video element
+        setTimeout(() => {
+          const videoElement = remoteVideoRefs.current.get(userId)
+          if (videoElement && stream) {
+            videoElement.srcObject = stream
+          }
+        }, 100)
+      })
+      
+      webrtcManagerRef.current.onRemoteStreamRemoved((userId) => {
+        setRemoteStreams(prev => {
+          const newMap = new Map(prev)
+          newMap.delete(userId)
+          return newMap
+        })
+      })
+    }
+    
+    return () => {
+      if (webrtcManagerRef.current) {
+        webrtcManagerRef.current.destroy()
+        webrtcManagerRef.current = null
+      }
+    }
+  }, [roomId, userId])
+
+  // Update local video element when stream changes
+  useEffect(() => {
+    if (localVideoRef.current && callState?.localStream) {
+      localVideoRef.current.srcObject = callState.localStream
+    } else if (localVideoRef.current && !callState?.localStream) {
+      localVideoRef.current.srcObject = null
+    }
+  }, [callState?.localStream])
+
+  // Handle starting a call
+  const handleStartCall = async (type: 'audio' | 'video') => {
+    if (!webrtcManagerRef.current) return
+    
+    try {
+      setCallType(type)
+      await webrtcManagerRef.current.startCall(type === 'video', true)
+      setShowCallModal(true)
+    } catch (error) {
+      console.error('Failed to start call:', error)
+      setErrorMessage('Failed to start call. Please check your camera/microphone permissions.')
+      setTimeout(() => setErrorMessage(null), 5000)
+    }
+  }
+
+  // Handle ending a call
+  const handleEndCall = async () => {
+    if (webrtcManagerRef.current) {
+      await webrtcManagerRef.current.endCall()
+      setShowCallModal(false)
+      setCallType(null)
+      setRemoteStreams(new Map())
+    }
+  }
+
+  // Handle toggling video
+  const handleToggleVideo = () => {
+    if (webrtcManagerRef.current) {
+      webrtcManagerRef.current.toggleVideo()
+    }
+  }
+
+  // Handle toggling audio
+  const handleToggleAudio = () => {
+    if (webrtcManagerRef.current) {
+      webrtcManagerRef.current.toggleAudio()
+    }
+  }
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (roomId && userId) {
         leaveRoom(roomId, userId).catch(console.error)
       }
-
+      if (webrtcManagerRef.current) {
+        webrtcManagerRef.current.destroy()
+      }
     }
   }, [])
   
@@ -1213,36 +1336,314 @@ export default function Home() {
       
       {/* Room Info Bar */}
       {roomId && !showRoomModal && (
-        <div className="fixed top-4 left-4 right-4 z-50 flex items-center justify-between bg-black/70 backdrop-blur-sm rounded-lg p-4 border border-purple-500/30">
-          <div className="flex items-center gap-4">
-            <div>
-              <div className="text-sm text-gray-400">Room Code</div>
-              <div className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-pink-500">
-                {roomCode}
-              </div>
-            </div>
-            <div className="h-8 w-px bg-purple-500/50"></div>
-            <div>
-              <div className="text-sm text-gray-400">Users in Room</div>
-              <div className="text-lg font-semibold text-white">
-                {roomUsers.length} {roomUsers.length === 1 ? 'person' : 'people'}
-              </div>
-            </div>
-            {isHost && (
-              <>
-                <div className="h-8 w-px bg-purple-500/50"></div>
-                <div className="px-3 py-1 bg-purple-600/50 rounded-full text-sm text-purple-200">
-                  👑 Host
+        <div className="room-actions-container fixed top-2 left-2 right-2 md:top-4 md:left-4 md:right-4 z-50 bg-black/70 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl">
+          {/* Mobile: Collapsible header */}
+          <div className="flex items-center justify-between p-2 md:p-4">
+            <div className="flex items-center gap-2 md:gap-4 flex-1 min-w-0">
+              <div className="min-w-0">
+                <div className="text-xs md:text-sm text-gray-400">Room Code</div>
+                <div className="text-lg md:text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-pink-500 truncate">
+                  {roomCode}
                 </div>
-              </>
-            )}
+              </div>
+              <div className="h-6 md:h-8 w-px bg-purple-500/50 hidden sm:block"></div>
+              <div className="hidden sm:block">
+                <div className="text-xs md:text-sm text-gray-400">Users</div>
+                <div className="text-sm md:text-lg font-semibold text-white">
+                  {roomUsers.length} {roomUsers.length === 1 ? 'person' : 'people'}
+                </div>
+              </div>
+              {isHost && (
+                <>
+                  <div className="h-6 md:h-8 w-px bg-purple-500/50 hidden sm:block"></div>
+                  <div className="px-2 md:px-3 py-1 bg-purple-600/50 rounded-full text-xs md:text-sm text-purple-200 hidden sm:block">
+                    👑 Host
+                  </div>
+                </>
+              )}
+            </div>
+            
+            {/* Mobile: Menu button */}
+            <button
+              onClick={() => setShowRoomActionsMenu(!showRoomActionsMenu)}
+              className="md:hidden p-2 hover:bg-purple-500/20 rounded-lg transition-colors"
+              title="Menu"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+
+            {/* Desktop: Action buttons */}
+            <div className="hidden md:flex items-center gap-2">
+              {!callState?.isInCall ? (
+                <>
+                  <button
+                    onClick={() => handleStartCall('audio')}
+                    className="px-3 py-2 bg-green-600/50 hover:bg-green-600 rounded-lg text-white font-semibold transition-all flex items-center gap-2"
+                    title="Start Audio Call"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                    </svg>
+                    <span className="hidden lg:inline">Audio</span>
+                  </button>
+                  <button
+                    onClick={() => handleStartCall('video')}
+                    className="px-3 py-2 bg-blue-600/50 hover:bg-blue-600 rounded-lg text-white font-semibold transition-all flex items-center gap-2"
+                    title="Start Video Call"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    <span className="hidden lg:inline">Video</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setShowCallModal(true)}
+                  className="px-3 py-2 bg-purple-600/50 hover:bg-purple-600 rounded-lg text-white font-semibold transition-all flex items-center gap-2"
+                  title="Open Call"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  <span className="hidden lg:inline">In Call</span>
+                </button>
+              )}
+              <button
+                onClick={handleLeaveRoom}
+                className="px-3 py-2 bg-red-600/50 hover:bg-red-600 rounded-lg text-white font-semibold transition-all"
+                title="Leave Room"
+              >
+                <span className="hidden lg:inline">Leave</span>
+                <span className="lg:hidden">Exit</span>
+              </button>
+            </div>
           </div>
-          <button
-            onClick={handleLeaveRoom}
-            className="px-4 py-2 bg-red-600/50 hover:bg-red-600 rounded-lg text-white font-semibold transition-all"
-          >
-            Leave Room
-          </button>
+
+          {/* Mobile: Collapsible menu */}
+          {showRoomActionsMenu && (
+            <div className="md:hidden border-t border-purple-500/30 p-2 space-y-2">
+              {/* Mobile info row */}
+              <div className="flex items-center justify-between text-xs text-gray-400 px-2 pb-2">
+                <div>
+                  Users: <span className="text-white font-semibold">{roomUsers.length}</span>
+                </div>
+                {isHost && (
+                  <div className="px-2 py-1 bg-purple-600/50 rounded-full text-purple-200">
+                    👑 Host
+                  </div>
+                )}
+              </div>
+              
+              {/* Mobile action buttons */}
+              <div className="grid grid-cols-2 gap-2">
+                {!callState?.isInCall ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        handleStartCall('audio')
+                        setShowRoomActionsMenu(false)
+                      }}
+                      className="px-3 py-2.5 bg-green-600/50 hover:bg-green-600 rounded-lg text-white font-semibold transition-all flex items-center justify-center gap-2"
+                      title="Start Audio Call"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                      </svg>
+                      <span>Audio</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        handleStartCall('video')
+                        setShowRoomActionsMenu(false)
+                      }}
+                      className="px-3 py-2.5 bg-blue-600/50 hover:bg-blue-600 rounded-lg text-white font-semibold transition-all flex items-center justify-center gap-2"
+                      title="Start Video Call"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                      <span>Video</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setShowCallModal(true)
+                      setShowRoomActionsMenu(false)
+                    }}
+                    className="col-span-2 px-3 py-2.5 bg-purple-600/50 hover:bg-purple-600 rounded-lg text-white font-semibold transition-all flex items-center justify-center gap-2"
+                    title="Open Call"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    <span>In Call - Open</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    handleLeaveRoom()
+                    setShowRoomActionsMenu(false)
+                  }}
+                  className="col-span-2 px-3 py-2.5 bg-red-600/50 hover:bg-red-600 rounded-lg text-white font-semibold transition-all flex items-center justify-center gap-2"
+                  title="Leave Room"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  <span>Leave Room</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      
+      {/* Call Modal */}
+      {showCallModal && callState?.isInCall && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[100] flex items-center justify-center p-0 md:p-4">
+          <div className="w-full h-full md:max-w-6xl md:h-[90vh] md:rounded-lg bg-black/80 border border-purple-500/30 shadow-2xl flex flex-col overflow-hidden">
+            {/* Call Header */}
+            <div className="flex items-center justify-between p-2 md:p-4 border-b border-purple-500/30 flex-shrink-0">
+              <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
+                <div className="w-2 h-2 md:w-3 md:h-3 bg-red-500 rounded-full animate-pulse flex-shrink-0"></div>
+                <h3 className="text-sm md:text-lg font-semibold text-white truncate">
+                  <span className="hidden sm:inline">{callType === 'video' ? 'Video Call' : 'Audio Call'} - </span>
+                  {roomUsers.length} {roomUsers.length === 1 ? 'participant' : 'participants'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowCallModal(false)}
+                className="p-2 hover:bg-purple-500/20 rounded-lg transition-colors flex-shrink-0"
+                title="Minimize Call"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Video Grid */}
+            <div className="flex-1 overflow-auto p-2 md:p-4 min-h-0">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 md:gap-4 h-full">
+                {/* Local Video */}
+                {callType === 'video' && (
+                  <div className="relative bg-gray-900 rounded-lg overflow-hidden aspect-video">
+                    <video
+                      ref={localVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                    />
+                    {!callState.isVideoEnabled && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
+                        <div className="text-center">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400 mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                          <p className="text-gray-400 text-sm">You (Camera Off)</p>
+                        </div>
+                      </div>
+                    )}
+                    <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-xs text-white">
+                      You {!callState.isAudioEnabled && '🔇'}
+                    </div>
+                  </div>
+                )}
+
+                {/* Remote Videos */}
+                {Array.from(remoteStreams.entries()).map(([userId, stream]) => {
+                  const user = roomUsers.find(u => u.id === userId)
+                  return (
+                    <div key={userId} className="relative bg-gray-900 rounded-lg overflow-hidden aspect-video">
+                      <video
+                        ref={(el) => {
+                          if (el) {
+                            remoteVideoRefs.current.set(userId, el)
+                            el.srcObject = stream
+                          } else {
+                            remoteVideoRefs.current.delete(userId)
+                          }
+                        }}
+                        autoPlay
+                        playsInline
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-xs text-white">
+                        {user?.name || 'Unknown'}
+                      </div>
+                    </div>
+                  )
+                })}
+
+                {/* Empty state for audio-only calls */}
+                {callType === 'audio' && remoteStreams.size === 0 && (
+                  <div className="col-span-2 flex items-center justify-center h-full">
+                    <div className="text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-24 w-24 text-purple-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                      </svg>
+                      <p className="text-gray-400 text-lg">Audio call in progress...</p>
+                      <p className="text-gray-500 text-sm mt-2">Waiting for other participants to join</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Call Controls */}
+            <div className="p-2 md:p-4 border-t border-purple-500/30 flex items-center justify-center gap-2 md:gap-4 flex-shrink-0">
+              {callType === 'video' && (
+                <button
+                  onClick={handleToggleVideo}
+                  className={`p-2.5 md:p-3 rounded-full transition-all ${
+                    callState.isVideoEnabled
+                      ? 'bg-gray-700 hover:bg-gray-600 text-white'
+                      : 'bg-red-600 hover:bg-red-700 text-white'
+                  }`}
+                  title={callState.isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 md:h-6 md:w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    {callState.isVideoEnabled ? (
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    ) : (
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                    )}
+                  </svg>
+                </button>
+              )}
+              <button
+                onClick={handleToggleAudio}
+                className={`p-2.5 md:p-3 rounded-full transition-all ${
+                  callState.isAudioEnabled
+                    ? 'bg-gray-700 hover:bg-gray-600 text-white'
+                    : 'bg-red-600 hover:bg-red-700 text-white'
+                }`}
+                title={callState.isAudioEnabled ? 'Mute microphone' : 'Unmute microphone'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 md:h-6 md:w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  {callState.isAudioEnabled ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                  )}
+                </svg>
+              </button>
+              <button
+                onClick={handleEndCall}
+                className="p-2.5 md:p-3 rounded-full bg-red-600 hover:bg-red-700 text-white transition-all"
+                title="End call"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 md:h-6 md:w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12h18M3 6h18M3 18h18" />
+                </svg>
+              </button>
+            </div>
+          </div>
         </div>
       )}
       
