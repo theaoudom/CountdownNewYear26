@@ -177,6 +177,7 @@ export default function Home() {
   // Call state
   const [callState, setCallState] = useState<CallState | null>(null)
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map())
+  const [connectionStatuses, setConnectionStatuses] = useState<Map<string, { status: string; iceConnectionState: string; connectionState: string }>>(new Map())
   const [showCallModal, setShowCallModal] = useState(false)
   const [callType, setCallType] = useState<'audio' | 'video' | null>(null)
   const webrtcManagerRef = useRef<WebRTCManager | null>(null)
@@ -514,7 +515,29 @@ export default function Home() {
       })
       
       webrtcManagerRef.current.onRemoteStream((userId, stream) => {
-        console.log(`Remote stream received from ${userId}`, stream)
+        console.log(`Remote stream received from ${userId}`, {
+          id: stream.id,
+          active: stream.active,
+          audioTracks: stream.getAudioTracks().map(t => ({
+            enabled: t.enabled,
+            readyState: t.readyState,
+            muted: t.muted,
+          })),
+          videoTracks: stream.getVideoTracks().map(t => ({
+            enabled: t.enabled,
+            readyState: t.readyState,
+            muted: t.muted,
+          })),
+        })
+        
+        // Ensure audio tracks are enabled
+        stream.getAudioTracks().forEach(track => {
+          if (!track.enabled) {
+            console.log(`Enabling audio track from ${userId}`)
+            track.enabled = true
+          }
+        })
+        
         setRemoteStreams(prev => {
           const newMap = new Map(prev)
           newMap.set(userId, stream)
@@ -529,7 +552,8 @@ export default function Home() {
               videoElement.srcObject = stream
               console.log(`Updated video element for ${userId}`)
             }
-            // Ensure autoplay
+            // Ensure autoplay and unmuted for audio
+            videoElement.muted = false
             videoElement.play().catch(err => {
               console.warn(`Failed to play video for ${userId}:`, err)
             })
@@ -548,6 +572,15 @@ export default function Home() {
           return newMap
         })
       })
+      
+      webrtcManagerRef.current.onConnectionStatusChange((userId, status) => {
+        console.log(`Connection status for ${userId}:`, status)
+        setConnectionStatuses(prev => {
+          const newMap = new Map(prev)
+          newMap.set(userId, status)
+          return newMap
+        })
+      })
     }
     
     return () => {
@@ -561,7 +594,13 @@ export default function Home() {
   // Update local video element when stream changes
   useEffect(() => {
     if (localVideoRef.current && callState?.localStream) {
-      localVideoRef.current.srcObject = callState.localStream
+      if (localVideoRef.current.srcObject !== callState.localStream) {
+        localVideoRef.current.srcObject = callState.localStream
+        // Ensure autoplay on mobile
+        localVideoRef.current.play().catch(err => {
+          console.warn('Failed to play local video:', err)
+        })
+      }
     } else if (localVideoRef.current && !callState?.localStream) {
       localVideoRef.current.srcObject = null
     }
@@ -1567,9 +1606,12 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Remote Videos */}
+                {/* Remote Videos - Works for both 1-to-1 and group calls */}
                 {Array.from(remoteStreams.entries()).map(([userId, stream]) => {
                   const user = roomUsers.find(u => u.id === userId)
+                  const hasAudio = stream.getAudioTracks().length > 0
+                  const hasVideo = stream.getVideoTracks().length > 0
+                  
                   return (
                     <div key={userId} className="relative bg-gray-900 rounded-lg overflow-hidden aspect-video">
                       <video
@@ -1578,6 +1620,9 @@ export default function Home() {
                             remoteVideoRefs.current.set(userId, el)
                             if (el.srcObject !== stream) {
                               el.srcObject = stream
+                              // Ensure audio is not muted
+                              el.muted = false
+                              el.volume = 1.0
                               el.play().catch(err => {
                                 console.warn(`Failed to play video for ${userId}:`, err)
                               })
@@ -1589,26 +1634,137 @@ export default function Home() {
                         autoPlay
                         playsInline
                         muted={false}
+                        volume={1.0}
                         className="w-full h-full object-cover"
                       />
+                      {!hasVideo && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
+                          <div className="text-center">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400 mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                            </svg>
+                            <p className="text-gray-400 text-sm">{user?.name || 'Unknown'}</p>
+                            {hasAudio && <p className="text-gray-500 text-xs mt-1">Audio only</p>}
+                          </div>
+                        </div>
+                      )}
                       <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-xs text-white">
-                        {user?.name || 'Unknown'}
+                        {user?.name || 'Unknown'} {!hasAudio && '🔇'}
                       </div>
                     </div>
                   )
                 })}
 
-                {/* Empty state for audio-only calls */}
-                {callType === 'audio' && remoteStreams.size === 0 && (
-                  <div className="col-span-2 flex items-center justify-center h-full">
-                    <div className="text-center">
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-24 w-24 text-purple-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                      </svg>
-                      <p className="text-gray-400 text-lg">Audio call in progress...</p>
-                      <p className="text-gray-500 text-sm mt-2">Waiting for other participants to join</p>
-                    </div>
-                  </div>
+                {/* Empty state - Show connecting status when users are in room but streams not connected yet */}
+                {/* Only show for audio calls OR video calls when no local video is shown */}
+                {remoteStreams.size === 0 && (
+                  <>
+                    {/* Audio call - always show empty state when no streams */}
+                    {callType === 'audio' && (
+                      <div className="col-span-2 flex items-center justify-center h-full">
+                        <div className="text-center">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-24 w-24 text-purple-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                          </svg>
+                          <p className="text-gray-400 text-lg">Audio call in progress...</p>
+                          {(() => {
+                            const otherUsers = roomUsers.filter(u => u.id !== userId)
+                            const connectedCount = Array.from(connectionStatuses.values()).filter(
+                              s => s.status === 'connected'
+                            ).length
+                            const connectingCount = Array.from(connectionStatuses.values()).filter(
+                              s => s.status === 'connecting'
+                            ).length
+                            const hasConnected = connectedCount > 0
+                            
+                            if (hasConnected) {
+                              return (
+                                <div className="mt-2">
+                                  <div className="inline-block w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center mb-2 mx-auto">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </div>
+                                  <p className="text-green-400 text-sm font-semibold">✅ Connected!</p>
+                                  <p className="text-gray-400 text-xs mt-1">
+                                    {connectedCount} of {otherUsers.length} connected
+                                  </p>
+                                  {connectingCount > 0 && (
+                                    <p className="text-gray-500 text-xs mt-1">Connecting to {connectingCount} more...</p>
+                                  )}
+                                </div>
+                              )
+                            } else if (roomUsers.length > 1) {
+                              return (
+                                <div className="mt-2">
+                                  <div className="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-purple-400 mb-2"></div>
+                                  <p className="text-gray-500 text-sm">
+                                    Connecting to {roomUsers.length - 1} {roomUsers.length === 2 ? 'participant' : 'participants'}...
+                                  </p>
+                                  <p className="text-gray-600 text-xs mt-1">This may take a few seconds</p>
+                                </div>
+                              )
+                            } else {
+                              return <p className="text-gray-500 text-sm mt-2">Waiting for other participants to join</p>
+                            }
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Video call - only show empty state if no local video visible (so it doesn't overlap) */}
+                    {callType === 'video' && !callState?.localStream && (
+                      <div className="col-span-2 flex items-center justify-center h-full">
+                        <div className="text-center">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-24 w-24 text-purple-400 mx-auto mb-4 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                          <p className="text-gray-400 text-lg">Video call in progress...</p>
+                          {(() => {
+                            const otherUsers = roomUsers.filter(u => u.id !== userId)
+                            const connectedCount = Array.from(connectionStatuses.values()).filter(
+                              s => s.status === 'connected'
+                            ).length
+                            const connectingCount = Array.from(connectionStatuses.values()).filter(
+                              s => s.status === 'connecting'
+                            ).length
+                            const hasConnected = connectedCount > 0
+                            
+                            if (hasConnected) {
+                              return (
+                                <div className="mt-2">
+                                  <div className="inline-block w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center mb-2 mx-auto">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </div>
+                                  <p className="text-green-400 text-sm font-semibold">✅ Connected!</p>
+                                  <p className="text-gray-400 text-xs mt-1">
+                                    {connectedCount} of {otherUsers.length} connected
+                                  </p>
+                                  {connectingCount > 0 && (
+                                    <p className="text-gray-500 text-xs mt-1">Connecting to {connectingCount} more...</p>
+                                  )}
+                                </div>
+                              )
+                            } else if (roomUsers.length > 1) {
+                              return (
+                                <div className="mt-2">
+                                  <div className="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-purple-400 mb-2"></div>
+                                  <p className="text-gray-500 text-sm">
+                                    Connecting to {roomUsers.length - 1} {roomUsers.length === 2 ? 'participant' : 'participants'}...
+                                  </p>
+                                  <p className="text-gray-600 text-xs mt-1">This may take a few seconds</p>
+                                </div>
+                              )
+                            } else {
+                              return <p className="text-gray-500 text-sm mt-2">Waiting for other participants to join</p>
+                            }
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

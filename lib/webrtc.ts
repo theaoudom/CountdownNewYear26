@@ -25,6 +25,13 @@ export interface ICECandidate {
 
 export type SignalingMessage = CallOffer | CallAnswer | ICECandidate
 
+export interface ConnectionStatus {
+  userId: string
+  status: 'connecting' | 'connected' | 'disconnected' | 'failed'
+  iceConnectionState: string
+  connectionState: string
+}
+
 export interface CallState {
   isInCall: boolean
   isVideoEnabled: boolean
@@ -32,6 +39,7 @@ export interface CallState {
   localStream: MediaStream | null
   remoteStreams: Map<string, MediaStream>
   peerConnections: Map<string, RTCPeerConnection>
+  connectionStatuses: Map<string, ConnectionStatus>
 }
 
 export class WebRTCManager {
@@ -42,6 +50,7 @@ export class WebRTCManager {
   private onStateChangeCallback?: (state: CallState) => void
   private onRemoteStreamCallback?: (userId: string, stream: MediaStream) => void
   private onRemoteStreamRemovedCallback?: (userId: string) => void
+  private onConnectionStatusChangeCallback?: (userId: string, status: ConnectionStatus) => void
   private processedMessages: Set<string> = new Set()
   private iceCandidateQueue: Map<string, RTCIceCandidateInit[]> = new Map()
 
@@ -55,6 +64,7 @@ export class WebRTCManager {
       localStream: null,
       remoteStreams: new Map(),
       peerConnections: new Map(),
+      connectionStatuses: new Map(),
     }
   }
 
@@ -71,6 +81,10 @@ export class WebRTCManager {
     this.onRemoteStreamRemovedCallback = callback
   }
 
+  onConnectionStatusChange(callback: (userId: string, status: ConnectionStatus) => void) {
+    this.onConnectionStatusChangeCallback = callback
+  }
+
   private notifyStateChange() {
     if (this.onStateChangeCallback) {
       this.onStateChangeCallback({ ...this.callState })
@@ -80,13 +94,38 @@ export class WebRTCManager {
   // Start a call (audio or video)
   async startCall(videoEnabled: boolean = true, audioEnabled: boolean = true): Promise<void> {
     try {
-      // Get user media
+      // Enhanced media constraints for better mobile support
       const constraints: MediaStreamConstraints = {
-        video: videoEnabled ? { facingMode: 'user' } : false,
-        audio: audioEnabled,
+        video: videoEnabled ? {
+          facingMode: 'user',
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30, max: 30 },
+          // Mobile-specific optimizations
+          aspectRatio: 16 / 9,
+        } : false,
+        audio: audioEnabled ? {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          // Better audio quality
+          sampleRate: 48000,
+          channelCount: 1,
+        } : false,
       }
 
+      console.log('Requesting user media with constraints:', constraints)
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      
+      // Log stream info
+      stream.getTracks().forEach(track => {
+        console.log(`Track: ${track.kind}, enabled: ${track.enabled}, readyState: ${track.readyState}`)
+        if (track.kind === 'video') {
+          const settings = track.getSettings()
+          console.log('Video settings:', settings)
+        }
+      })
+      
       this.callState.localStream = stream
       this.callState.isVideoEnabled = videoEnabled
       this.callState.isAudioEnabled = audioEnabled
@@ -96,16 +135,22 @@ export class WebRTCManager {
       // Set up signaling listeners for all users in the room
       await this.setupSignaling()
 
-      // Create peer connections for existing users
+      // Create peer connections for existing users (for group calls)
       const usersRef = ref(database, `rooms/${this.roomId}/users`)
       const usersSnapshot = await get(usersRef)
       const users = usersSnapshot.val()
 
       if (users) {
-        for (const [otherUserId, _] of Object.entries(users)) {
+        const userEntries = Object.entries(users)
+        console.log(`Creating peer connections for ${userEntries.length - 1} other users`)
+        
+        // Create connections to all other users (mesh network for group calls)
+        for (const [otherUserId, _] of userEntries) {
           if (otherUserId !== this.userId) {
             // Determine who should be the initiator (lower user ID creates offer)
+            // This prevents both users from creating offers simultaneously
             const isInitiator = this.userId < (otherUserId as string)
+            console.log(`Creating connection to ${otherUserId}, isInitiator: ${isInitiator}`)
             await this.createPeerConnection(otherUserId as string, isInitiator)
           }
         }
@@ -191,11 +236,45 @@ export class WebRTCManager {
       return
     }
 
+    // Enhanced ICE servers configuration with TURN servers for better mobile/NAT traversal
     const configuration: RTCConfiguration = {
       iceServers: [
+        // STUN servers for NAT discovery
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        // Public TURN servers (free but may have limitations)
+        // Note: For production, consider using a paid TURN service like Twilio, Xirsys, or Metered
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        // Additional free TURN servers
+        {
+          urls: 'turn:relay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:relay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
       ],
+      iceCandidatePoolSize: 10, // Pre-gather ICE candidates for faster connection
     }
 
     const peerConnection = new RTCPeerConnection(configuration)
@@ -207,11 +286,32 @@ export class WebRTCManager {
       })
     }
 
-    // Handle remote stream
+    // Handle remote stream (works for both 1-to-1 and group calls)
     peerConnection.ontrack = (event) => {
       const [remoteStream] = event.streams
       if (remoteStream) {
-        console.log(`Received remote stream from ${otherUserId}`)
+        console.log(`Received remote stream from ${otherUserId}`, {
+          audioTracks: remoteStream.getAudioTracks().length,
+          videoTracks: remoteStream.getVideoTracks().length,
+        })
+        
+        // Log track details for debugging
+        remoteStream.getAudioTracks().forEach(track => {
+          console.log(`Audio track from ${otherUserId}:`, {
+            enabled: track.enabled,
+            readyState: track.readyState,
+            muted: track.muted,
+          })
+        })
+        
+        remoteStream.getVideoTracks().forEach(track => {
+          console.log(`Video track from ${otherUserId}:`, {
+            enabled: track.enabled,
+            readyState: track.readyState,
+            muted: track.muted,
+          })
+        })
+        
         this.callState.remoteStreams.set(otherUserId, remoteStream)
         if (this.onRemoteStreamCallback) {
           this.onRemoteStreamCallback(otherUserId, remoteStream)
@@ -230,21 +330,81 @@ export class WebRTCManager {
       }
     }
 
-    // Handle ICE connection state
-    peerConnection.oniceconnectionstatechange = () => {
-      console.log(`ICE connection state for ${otherUserId}:`, peerConnection.iceConnectionState)
-      if (peerConnection.iceConnectionState === 'failed') {
-        // Try to restart ICE
-        peerConnection.restartIce()
+    // Update connection status
+    const updateConnectionStatus = () => {
+      const iceState = peerConnection.iceConnectionState
+      const connState = peerConnection.connectionState
+      
+      let status: ConnectionStatus['status'] = 'connecting'
+      if (iceState === 'connected' || iceState === 'completed') {
+        status = 'connected'
+      } else if (iceState === 'disconnected' || connState === 'disconnected') {
+        status = 'disconnected'
+      } else if (iceState === 'failed' || connState === 'failed') {
+        status = 'failed'
+      }
+      
+      const connectionStatus: ConnectionStatus = {
+        userId: otherUserId,
+        status,
+        iceConnectionState: iceState,
+        connectionState: connState,
+      }
+      
+      this.callState.connectionStatuses.set(otherUserId, connectionStatus)
+      this.notifyStateChange()
+      
+      if (this.onConnectionStatusChangeCallback) {
+        this.onConnectionStatusChangeCallback(otherUserId, connectionStatus)
       }
     }
 
+    // Handle ICE connection state
+    peerConnection.oniceconnectionstatechange = () => {
+      const state = peerConnection.iceConnectionState
+      console.log(`ICE connection state for ${otherUserId}:`, state)
+      
+      updateConnectionStatus()
+      
+      if (state === 'failed') {
+        console.warn(`ICE connection failed for ${otherUserId}, attempting restart...`)
+        // Try to restart ICE
+        try {
+          peerConnection.restartIce()
+        } catch (error) {
+          console.error('Error restarting ICE:', error)
+          // If restart fails, try recreating the connection
+          setTimeout(() => {
+            if (this.callState.peerConnections.has(otherUserId)) {
+              console.log(`Recreating peer connection for ${otherUserId}`)
+              this.callState.peerConnections.delete(otherUserId)
+              const isInitiator = this.userId < otherUserId
+              this.createPeerConnection(otherUserId, isInitiator).catch(console.error)
+            }
+          }, 2000)
+        }
+      } else if (state === 'disconnected') {
+        console.warn(`ICE connection disconnected for ${otherUserId}`)
+        // Try to reconnect after a delay
+        setTimeout(() => {
+          if (peerConnection.iceConnectionState === 'disconnected' && 
+              this.callState.peerConnections.has(otherUserId)) {
+            console.log(`Attempting to reconnect to ${otherUserId}`)
+            peerConnection.restartIce()
+          }
+        }, 3000)
+      } else if (state === 'connected' || state === 'completed') {
+        console.log(`✅ ICE connection established with ${otherUserId}`)
+      }
+    }
+    
     // Handle connection state changes
     peerConnection.onconnectionstatechange = () => {
-      console.log(`Connection state for ${otherUserId}:`, peerConnection.connectionState)
-      if (peerConnection.connectionState === 'disconnected' || 
-          peerConnection.connectionState === 'failed' ||
-          peerConnection.connectionState === 'closed') {
+      const state = peerConnection.connectionState
+      console.log(`Connection state for ${otherUserId}:`, state)
+      updateConnectionStatus()
+      
+      if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         this.callState.remoteStreams.delete(otherUserId)
         if (this.onRemoteStreamRemovedCallback) {
           this.onRemoteStreamRemovedCallback(otherUserId)
@@ -252,6 +412,12 @@ export class WebRTCManager {
         this.notifyStateChange()
       }
     }
+    
+    // Handle ICE gathering state
+    peerConnection.onicegatheringstatechange = () => {
+      console.log(`ICE gathering state for ${otherUserId}:`, peerConnection.iceGatheringState)
+    }
+
 
     this.callState.peerConnections.set(otherUserId, peerConnection)
 
@@ -268,34 +434,105 @@ export class WebRTCManager {
       this.iceCandidateQueue.delete(otherUserId)
     }
 
-    // Create and send offer only if we're the initiator and have a local stream
+    // Create and send offer if we're the initiator
     if (isInitiator && this.callState.localStream) {
       try {
-        console.log(`Creating offer for ${otherUserId}`)
+        console.log(`🎯 Creating offer for ${otherUserId} (we are initiator)`)
+        
+        // Wait for ICE gathering to start
+        await new Promise<void>((resolve) => {
+          if (peerConnection.iceGatheringState === 'complete') {
+            resolve()
+          } else {
+            const checkState = () => {
+              if (peerConnection.iceGatheringState !== 'new') {
+                resolve()
+              } else {
+                setTimeout(checkState, 100)
+              }
+            }
+            checkState()
+          }
+        })
+        
         const offer = await peerConnection.createOffer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: this.callState.isVideoEnabled,
         })
+        
         await peerConnection.setLocalDescription(offer)
+        console.log(`✅ Local description set for ${otherUserId}`)
+        
+        // Wait a bit for ICE candidates to be gathered (but not too long)
+        await new Promise(resolve => setTimeout(resolve, 300))
+        
         await this.sendOffer(otherUserId, offer)
+        console.log(`✅ Offer sent to ${otherUserId}`)
       } catch (error) {
-        console.error('Error creating offer:', error)
+        console.error('❌ Error creating offer:', error)
+        throw error
       }
+    } else if (!isInitiator) {
+      // We're not the initiator, so we wait for an offer
+      // But add a timeout fallback in case the other user hasn't started the call
+      console.log(`⏳ Waiting for offer from ${otherUserId} (we are responder)`)
+      
+      // Set a timeout - if no offer comes within 5 seconds, check if we should create one
+      setTimeout(async () => {
+        // Check if we still don't have a remote description and no offer has been received
+        if (peerConnection.signalingState === 'stable' && !peerConnection.remoteDescription) {
+          console.log(`⏰ Timeout waiting for offer from ${otherUserId}, checking if we should create offer as fallback...`)
+          
+          // Check if there are any pending offers in Firebase
+          const signalingRef = ref(database, `rooms/${this.roomId}/signaling/${otherUserId}`)
+          const signalingSnapshot = await get(signalingRef)
+          const signaling = signalingSnapshot.val()
+          
+          const hasOffer = signaling && Object.values(signaling).some((msg: any) => msg.type === 'offer')
+          
+          if (!hasOffer) {
+            console.log(`🔄 No offer found from ${otherUserId}, creating offer as fallback (both users might be waiting)`)
+            // Create offer as fallback
+            try {
+              const offer = await peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: this.callState.isVideoEnabled,
+              })
+              
+              await peerConnection.setLocalDescription(offer)
+              await new Promise(resolve => setTimeout(resolve, 300))
+              await this.sendOffer(otherUserId, offer)
+              console.log(`✅ Fallback offer sent to ${otherUserId}`)
+            } catch (error) {
+              console.error('❌ Error creating fallback offer:', error)
+            }
+          } else {
+            console.log(`✅ Offer found from ${otherUserId}, waiting for it to be processed...`)
+          }
+        }
+      }, 5000) // 5 second timeout
     }
   }
 
   // Set up signaling listeners
   private async setupSignaling(): Promise<void> {
-    // Listen for new users joining
+    // Listen for new users joining (for group calls - supports multiple users)
     const usersRef = ref(database, `rooms/${this.roomId}/users`)
     const unsubscribeUsers = onValue(usersRef, async (snapshot) => {
       const users = snapshot.val()
-      if (users) {
-        for (const [otherUserId, _] of Object.entries(users)) {
+      if (users && this.callState.isInCall) {
+        const userEntries = Object.entries(users)
+        console.log(`Users in room: ${userEntries.length}, creating connections...`)
+        
+        for (const [otherUserId, _] of userEntries) {
           if (otherUserId !== this.userId && 
               !this.callState.peerConnections.has(otherUserId as string)) {
             // Determine who should be the initiator (lower user ID creates offer)
+            // This ensures only one user creates the offer, preventing conflicts
             const isInitiator = this.userId < (otherUserId as string)
+            console.log(`👤 New user ${otherUserId} joined`)
+            console.log(`🔀 User ID comparison: ${this.userId} < ${otherUserId} = ${isInitiator}`)
+            console.log(`📞 Creating peer connection, isInitiator: ${isInitiator}`)
             await this.createPeerConnection(otherUserId as string, isInitiator)
           }
         }
@@ -305,62 +542,104 @@ export class WebRTCManager {
 
     // Listen for signaling messages
     const signalingRef = ref(database, `rooms/${this.roomId}/signaling`)
+    console.log(`👂 Setting up signaling listener for room ${this.roomId}`)
+    
     const unsubscribeSignaling = onValue(signalingRef, (snapshot) => {
       const signaling = snapshot.val()
-      if (!signaling) return
+      if (!signaling) {
+        console.log('📭 No signaling messages found (this is normal if no one has sent messages yet)')
+        return
+      }
 
+      const signalingKeys = Object.keys(signaling)
+      console.log(`📨 Signaling data received from ${signalingKeys.length} user(s):`, signalingKeys)
+      
       for (const [fromUserId, messages] of Object.entries(signaling)) {
-        if (fromUserId === this.userId) continue
+        if (fromUserId === this.userId) {
+          console.log(`⏭️ Skipping own messages from ${fromUserId}`)
+          continue
+        }
 
         const messagesObj = messages as Record<string, SignalingMessage>
-        if (!messagesObj) continue
+        if (!messagesObj) {
+          console.log(`⚠️ No messages object for ${fromUserId}`)
+          continue
+        }
+
+        const messageCount = Object.keys(messagesObj).length
+        console.log(`📬 Processing ${messageCount} message(s) from ${fromUserId}`)
 
         for (const [messageId, message] of Object.entries(messagesObj)) {
+          console.log(`📩 Message ${messageId.substring(0, 20)}... from ${fromUserId}, type: ${message.type}`)
+          
           // Process message asynchronously
           this.handleSignalingMessage(fromUserId, message as SignalingMessage, messageId).then(() => {
-            // Clean up processed message after a delay to ensure it's been processed
+            console.log(`✅ Successfully processed message ${messageId.substring(0, 20)}... from ${fromUserId}`)
+            // Clean up processed message after a longer delay to ensure it's been processed
             setTimeout(() => {
               const messageRef = ref(database, `rooms/${this.roomId}/signaling/${fromUserId}/${messageId}`)
-              remove(messageRef).catch(console.error)
-            }, 1000)
-          }).catch(console.error)
+              remove(messageRef).then(() => {
+                console.log(`🗑️ Cleaned up message ${messageId.substring(0, 20)}... from ${fromUserId}`)
+              }).catch(console.error)
+            }, 5000) // Increased to 5 seconds to ensure message is processed
+          }).catch((error) => {
+            console.error(`❌ Error processing message ${messageId} from ${fromUserId}:`, error)
+          })
         }
       }
+    }, (error) => {
+      console.error('❌ Error in signaling listener:', error)
     })
     this.signalingUnsubscribers.set('signaling', unsubscribeSignaling)
+    console.log(`✅ Signaling listener set up`)
   }
 
   // Handle incoming signaling messages
   private async handleSignalingMessage(fromUserId: string, message: SignalingMessage, messageId: string): Promise<void> {
+    console.log(`🔍 Handling message from ${fromUserId}, type: ${message.type}, messageId: ${messageId}`)
+    
     // Only handle messages if we're in a call
-    if (!this.callState.isInCall) return
+    if (!this.callState.isInCall) {
+      console.log(`⚠️ Not in call, ignoring message from ${fromUserId}`)
+      return
+    }
 
     // Skip if already processed
     const messageKey = `${fromUserId}_${messageId}`
     if (this.processedMessages.has(messageKey)) {
+      console.log(`⏭️ Message ${messageId} from ${fromUserId} already processed, skipping`)
       return
     }
     this.processedMessages.add(messageKey)
+    console.log(`✅ Processing new message ${messageId} from ${fromUserId}`)
 
     let peerConnection = this.callState.peerConnections.get(fromUserId)
 
     if (message.type === 'offer') {
-      console.log(`Received offer from ${fromUserId}`)
+      console.log(`📥 Received offer from ${fromUserId}`)
+      console.log(`📥 Offer SDP: ${message.sdp.type}, length: ${message.sdp.sdp?.length || 0}`)
+      
       if (!peerConnection) {
+        console.log(`🔧 No peer connection exists for ${fromUserId}, creating as responder...`)
         // Create peer connection as responder (not initiator)
         await this.createPeerConnection(fromUserId, false)
         peerConnection = this.callState.peerConnections.get(fromUserId)
+        console.log(`✅ Peer connection created for ${fromUserId}`)
+      } else {
+        console.log(`✅ Peer connection already exists for ${fromUserId}`)
       }
 
       if (peerConnection) {
         try {
+          console.log(`🔧 Setting remote description (offer) from ${fromUserId}...`)
           // Set remote description first
           await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp))
-          console.log(`Set remote description from ${fromUserId}`)
+          console.log(`✅ Remote description (offer) set from ${fromUserId}`)
           
           // Process any queued ICE candidates
           const queuedCandidates = this.iceCandidateQueue.get(fromUserId)
           if (queuedCandidates && queuedCandidates.length > 0) {
+            console.log(`📦 Processing ${queuedCandidates.length} queued ICE candidates from ${fromUserId}`)
             for (const candidate of queuedCandidates) {
               try {
                 await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
@@ -371,17 +650,29 @@ export class WebRTCManager {
             this.iceCandidateQueue.delete(fromUserId)
           }
           
+          console.log(`🔧 Creating answer for ${fromUserId}...`)
           // Create and send answer
           const answer = await peerConnection.createAnswer({
             offerToReceiveAudio: true,
             offerToReceiveVideo: this.callState.isVideoEnabled,
           })
+          
+          console.log(`🔧 Setting local description (answer) for ${fromUserId}...`)
           await peerConnection.setLocalDescription(answer)
-          console.log(`Sending answer to ${fromUserId}`)
+          console.log(`✅ Local description (answer) set for ${fromUserId}`)
+          
+          // Wait a bit for ICE candidates (but not too long)
+          await new Promise(resolve => setTimeout(resolve, 300))
+          
+          console.log(`📤 Sending answer to ${fromUserId}`)
           await this.sendAnswer(fromUserId, answer)
+          console.log(`✅ Answer sent to ${fromUserId}`)
         } catch (error) {
-          console.error('Error handling offer:', error)
+          console.error(`❌ Error handling offer from ${fromUserId}:`, error)
+          console.error('Error details:', error instanceof Error ? error.stack : error)
         }
+      } else {
+        console.error(`❌ Failed to create/get peer connection for ${fromUserId}`)
       }
     } else if (message.type === 'answer') {
       console.log(`Received answer from ${fromUserId}`)
@@ -438,10 +729,12 @@ export class WebRTCManager {
 
   // Send offer
   private async sendOffer(toUserId: string, offer: RTCSessionDescriptionInit): Promise<void> {
-    const messageRef = ref(database, `rooms/${this.roomId}/signaling/${this.userId}`)
-    const messageId = `offer_${Date.now()}`
+    const messageId = `offer_${Date.now()}_${Math.random().toString(36).substring(7)}`
     
     const userName = await this.getUserName()
+    
+    console.log(`📤 Sending offer to ${toUserId}, messageId: ${messageId}`)
+    console.log(`📤 Offer SDP type: ${offer.type}, length: ${offer.sdp?.length || 0}`)
     
     await set(ref(database, `rooms/${this.roomId}/signaling/${this.userId}/${messageId}`), {
       type: 'offer',
@@ -450,12 +743,16 @@ export class WebRTCManager {
       fromUserName: userName,
       timestamp: Date.now(),
     } as CallOffer)
+    
+    console.log(`✅ Offer sent to ${toUserId} at path: rooms/${this.roomId}/signaling/${this.userId}/${messageId}`)
   }
 
   // Send answer
   private async sendAnswer(toUserId: string, answer: RTCSessionDescriptionInit): Promise<void> {
-    const messageRef = ref(database, `rooms/${this.roomId}/signaling/${this.userId}`)
-    const messageId = `answer_${Date.now()}`
+    const messageId = `answer_${Date.now()}_${Math.random().toString(36).substring(7)}`
+    
+    console.log(`📤 Sending answer to ${toUserId}, messageId: ${messageId}`)
+    console.log(`📤 Answer SDP type: ${answer.type}, length: ${answer.sdp?.length || 0}`)
     
     await set(ref(database, `rooms/${this.roomId}/signaling/${this.userId}/${messageId}`), {
       type: 'answer',
@@ -463,12 +760,18 @@ export class WebRTCManager {
       fromUserId: this.userId,
       timestamp: Date.now(),
     } as CallAnswer)
+    
+    console.log(`✅ Answer sent to ${toUserId} at path: rooms/${this.roomId}/signaling/${this.userId}/${messageId}`)
   }
 
   // Send ICE candidate
   private async sendICECandidate(toUserId: string, candidate: RTCIceCandidate): Promise<void> {
-    const messageRef = ref(database, `rooms/${this.roomId}/signaling/${this.userId}`)
-    const messageId = `ice_${Date.now()}`
+    const messageId = `ice_${Date.now()}_${Math.random().toString(36).substring(7)}`
+    
+    // Don't log every ICE candidate (too verbose), but log occasionally
+    if (Math.random() < 0.1) { // Log 10% of ICE candidates
+      console.log(`📤 Sending ICE candidate to ${toUserId} (${messageId.substring(0, 20)}...)`)
+    }
     
     await set(ref(database, `rooms/${this.roomId}/signaling/${this.userId}/${messageId}`), {
       type: 'ice-candidate',
@@ -476,6 +779,16 @@ export class WebRTCManager {
       fromUserId: this.userId,
       timestamp: Date.now(),
     } as ICECandidate)
+  }
+
+  // Prefer specific codecs in SDP (simplified to avoid breaking SDP)
+  private preferCodecs(sdp: string, codecs: { video?: string[]; audio?: string[] }): string {
+    // Don't modify SDP if it might break - let browser handle codec selection
+    // This is a simplified version that just ensures the SDP is valid
+    return sdp
+    
+    // Original codec preference code was too complex and could break SDP
+    // Browser's default codec selection is usually better
   }
 
   // Get user name from Firebase
