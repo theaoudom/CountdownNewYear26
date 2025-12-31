@@ -226,10 +226,10 @@ export default function Home() {
                 const canvas = canvasRef.current
                 const ctx = canvas.getContext('2d')
                 if (ctx) {
-                  // Launch 10 small fireworks from different positions
-                  for (let i = 0; i < 10; i++) {
+                  // Launch 5 small fireworks from different positions (reduced from 10)
+                  for (let i = 0; i < 5; i++) {
                     setTimeout(() => {
-                      const x = (canvas.width / 11) * (i + 1) // Spread across screen
+                      const x = (canvas.width / 6) * (i + 1) // Spread across screen
                       const y = canvas.height
                       const targetY = 150 + Math.random() * (canvas.height * 0.4)
                       
@@ -244,9 +244,9 @@ export default function Home() {
                           // Play firework sound
                           playFireworkSound('normal')
                           
-                          // Create explosion with more particles
+                          // Create explosion with fewer particles
                           const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#F7DC6F', '#BB8FCE', '#F8B739', '#E74C3C', '#FFD700', '#FF1493', '#00CED1']
-                          const particleCount = 70 + Math.random() * 50
+                          const particleCount = 40 + Math.random() * 30 // Reduced from 70-120 to 40-70
                           
                           for (let j = 0; j < particleCount; j++) {
                             const angle = (Math.PI * 2 * j) / particleCount + Math.random() * 0.5
@@ -266,7 +266,7 @@ export default function Home() {
                           }
                         }
                       }, 16)
-                    }, i * 120) // Stagger the launches (faster sequence)
+                    }, i * 250) // Stagger the launches (reduced frequency - increased from 120ms to 250ms)
                   }
                 }
               }
@@ -368,7 +368,7 @@ export default function Home() {
         '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8',
         '#F7DC6F', '#BB8FCE', '#85C1E2', '#F8B739', '#E74C3C'
       ]
-      const particleCount = 50 + Math.random() * 30
+      const particleCount = 30 + Math.random() * 20 // Reduced from 50-80 to 30-50
 
       for (let i = 0; i < particleCount; i++) {
         const angle = (Math.PI * 2 * i) / particleCount + Math.random() * 0.5
@@ -409,10 +409,10 @@ export default function Home() {
     // Launch initial fireworks
     launchFirework()
     const fireworkInterval = setInterval(() => {
-      if (Math.random() > 0.3) {
+      if (Math.random() > 0.6) { // Reduced from 0.3 to 0.6 (40% chance instead of 70%)
         launchFirework()
       }
-    }, 2000)
+    }, 4000) // Increased from 2000ms to 4000ms (every 4 seconds instead of 2)
 
     // Animation loop
     const animate = () => {
@@ -720,8 +720,8 @@ export default function Home() {
       const canvas = canvasRef.current
       const ctx = canvas.getContext('2d')
       if (ctx) {
-        // Create multiple explosions at once
-        for (let i = 0; i < 5; i++) {
+        // Create multiple explosions at once (reduced from 5 to 3)
+        for (let i = 0; i < 3; i++) {
           setTimeout(() => {
             const x = Math.random() * canvas.width
             const y = 100 + Math.random() * (canvas.height * 0.5)
@@ -730,7 +730,7 @@ export default function Home() {
             playFireworkSound('normal')
             
             const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#F7DC6F', '#BB8FCE', '#F8B739', '#E74C3C']
-            const particleCount = 80
+            const particleCount = 60 // Reduced from 80 to 60
             
             for (let j = 0; j < particleCount; j++) {
               const angle = (Math.PI * 2 * j) / particleCount + Math.random() * 0.5
