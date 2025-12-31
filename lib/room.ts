@@ -1,4 +1,4 @@
-import { ref, set, onValue, off, push, remove, update } from 'firebase/database'
+import { ref, set, onValue, off, push, remove, update, serverTimestamp } from 'firebase/database'
 import { database } from './firebase'
 
 export interface RoomData {
@@ -241,15 +241,21 @@ export async function updateRoomTargetDate(roomId: string, targetDate: number): 
 export async function sendChatMessage(roomId: string, userId: string, userName: string, message: string): Promise<void> {
   if (!message.trim()) return
   
-  const messageId = push(ref(database, `rooms/${roomId}/messages`)).key
+  const messagesRef = ref(database, `rooms/${roomId}/messages`)
+  const messageId = push(messagesRef).key
   if (!messageId) throw new Error('Failed to create message ID')
+  
+  // Use server timestamp for accurate ordering across all clients
+  // Also include client timestamp as fallback for immediate display
+  const clientTimestamp = Date.now()
   
   await set(ref(database, `rooms/${roomId}/messages/${messageId}`), {
     id: messageId,
     userId,
     userName,
     message: message.trim(),
-    timestamp: Date.now(),
+    timestamp: serverTimestamp(), // Server timestamp for accurate ordering
+    clientTimestamp, // Client timestamp as fallback
   })
 }
 
@@ -265,9 +271,43 @@ export function subscribeToChat(
       const data = snapshot.val()
       if (data) {
         // Convert object to array and sort by timestamp
-        const messages = Object.values(data)
-          .filter((msg: any) => msg && msg.message && msg.userName)
-          .sort((a: any, b: any) => a.timestamp - b.timestamp) as ChatMessage[]
+        // Handle server timestamps (which are objects) and client timestamps (which are numbers)
+        const messages = Object.entries(data)
+          .filter(([_, msg]: [string, any]) => msg && msg.message && msg.userName)
+          .map(([key, msg]: [string, any]) => {
+            // Extract timestamp value - server timestamp is an object, client timestamp is a number
+            let timestamp = 0
+            if (msg.timestamp) {
+              // Server timestamp is an object like { '.sv': 'timestamp' } before it's resolved
+              // After resolution, it becomes a number
+              timestamp = typeof msg.timestamp === 'number' ? msg.timestamp : (msg.clientTimestamp || 0)
+            } else {
+              timestamp = msg.clientTimestamp || 0
+            }
+            
+            return {
+              ...msg,
+              timestamp, // Normalized timestamp for sorting
+              _sortKey: key, // Use Firebase push key as tiebreaker (already time-ordered)
+            }
+          })
+          .sort((a: any, b: any) => {
+            // Primary sort: timestamp
+            if (a.timestamp !== b.timestamp) {
+              return a.timestamp - b.timestamp
+            }
+            // Secondary sort: Firebase push key (time-ordered, ensures consistent ordering)
+            return a._sortKey.localeCompare(b._sortKey)
+          })
+          .map((msg: any) => {
+            // Remove internal sort key and ensure timestamp is a number
+            const { _sortKey, ...message } = msg
+            // Ensure timestamp is always a number for the ChatMessage interface
+            if (typeof message.timestamp !== 'number') {
+              message.timestamp = message.clientTimestamp || Date.now()
+            }
+            return message
+          }) as ChatMessage[]
         callback(messages)
       } else {
         callback([])
