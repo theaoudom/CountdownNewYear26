@@ -169,6 +169,8 @@ export default function Home() {
   const [chatInput, setChatInput] = useState('')
   const [showChat, setShowChat] = useState(true)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+  const [chatSoundEnabled, setChatSoundEnabled] = useState(true)
+  const lastMessageTimestampRef = useRef<number>(0)
   
   // Users list state
   const [showUsersList, setShowUsersList] = useState(true)
@@ -430,18 +432,90 @@ export default function Home() {
     }
   }, [roomId, userId])
   
+  // Play notification sound for new messages
+  const playChatNotificationSound = useCallback(() => {
+    if (!chatSoundEnabled) return
+    
+    try {
+      // Create a simple "ting" notification sound using Web Audio API
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const oscillator = audioContext.createOscillator()
+      const gainNode = audioContext.createGain()
+      
+      oscillator.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+      
+      // Create a pleasant "ting" sound (two-tone chime)
+      oscillator.type = 'sine'
+      
+      // First tone (higher)
+      oscillator.frequency.setValueAtTime(800, audioContext.currentTime)
+      oscillator.frequency.exponentialRampToValueAtTime(1000, audioContext.currentTime + 0.1)
+      
+      // Volume envelope - quick fade in and out
+      gainNode.gain.setValueAtTime(0, audioContext.currentTime)
+      gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.01)
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15)
+      
+      oscillator.start(audioContext.currentTime)
+      oscillator.stop(audioContext.currentTime + 0.15)
+      
+      // Second tone (lower, slightly delayed)
+      setTimeout(() => {
+        const oscillator2 = audioContext.createOscillator()
+        const gainNode2 = audioContext.createGain()
+        
+        oscillator2.connect(gainNode2)
+        gainNode2.connect(audioContext.destination)
+        
+        oscillator2.type = 'sine'
+        oscillator2.frequency.setValueAtTime(600, audioContext.currentTime)
+        oscillator2.frequency.exponentialRampToValueAtTime(800, audioContext.currentTime + 0.1)
+        
+        gainNode2.gain.setValueAtTime(0, audioContext.currentTime)
+        gainNode2.gain.linearRampToValueAtTime(0.25, audioContext.currentTime + 0.01)
+        gainNode2.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15)
+        
+        oscillator2.start(audioContext.currentTime)
+        oscillator2.stop(audioContext.currentTime + 0.15)
+      }, 50)
+    } catch (error) {
+      console.warn('Could not play notification sound:', error)
+    }
+  }, [chatSoundEnabled])
+
   // Subscribe to chat messages
   useEffect(() => {
-    if (!roomId) return
+    if (!roomId || !userId) return
     
     const unsubscribe = subscribeToChat(roomId, (messages: ChatMessage[]) => {
+      // Check for new messages from other users
+      if (messages.length > 0) {
+        const latestMessage = messages[messages.length - 1]
+        
+        // Only play sound for messages from other users
+        if (latestMessage.userId !== userId) {
+          // Check if this is a new message (not one we've already seen)
+          if (latestMessage.timestamp > lastMessageTimestampRef.current) {
+            // Only play sound if chat is closed or user is not actively viewing it
+            // (or if it's been a while since last message)
+            const timeSinceLastMessage = Date.now() - lastMessageTimestampRef.current
+            if (!showChat || timeSinceLastMessage > 2000) {
+              playChatNotificationSound()
+            }
+            
+            lastMessageTimestampRef.current = latestMessage.timestamp
+          }
+        }
+      }
+      
       setChatMessages(messages)
     })
     
     return () => {
       unsubscribe()
     }
-  }, [roomId])
+  }, [roomId, userId, showChat, playChatNotificationSound])
   
   // Auto-scroll chat to bottom when messages change
   useEffect(() => {
@@ -1846,20 +1920,38 @@ export default function Home() {
       
       {/* Chat Panel (bottom left) */}
       {roomId && !showRoomModal && (
-        <div className="fixed bottom-4 left-4 z-50 w-80 bg-black/80 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl flex flex-col max-h-96 overflow-hidden">
+        <div className="fixed bottom-4 left-2 right-2 md:left-4 md:right-auto z-50 w-auto md:w-80 bg-black/80 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl flex flex-col max-h-96 overflow-hidden">
           {/* Chat Header */}
-          <button
-            onClick={() => setShowChat(!showChat)}
-            className="w-full flex items-center justify-between p-3 border-b border-purple-500/30 hover:bg-purple-500/10 transition-colors cursor-pointer"
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-lg">💬</span>
-              <h3 className="text-sm font-semibold text-white">Room Chat</h3>
-            </div>
-            <span className="text-gray-400 hover:text-white transition-colors text-sm">
-              {showChat ? '▼' : '▲'}
-            </span>
-          </button>
+          <div className="w-full flex items-center justify-between p-3 border-b border-purple-500/30">
+            <button
+              onClick={() => setShowChat(!showChat)}
+              className="flex-1 flex items-center justify-between hover:bg-purple-500/10 transition-colors cursor-pointer rounded px-2 py-1 -mx-2 -my-1"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-lg">💬</span>
+                <h3 className="text-sm font-semibold text-white">Room Chat</h3>
+              </div>
+              <span className="text-gray-400 hover:text-white transition-colors text-sm">
+                {showChat ? '▼' : '▲'}
+              </span>
+            </button>
+            <button
+              onClick={() => setChatSoundEnabled(!chatSoundEnabled)}
+              className="p-1.5 hover:bg-purple-500/20 rounded transition-colors"
+              title={chatSoundEnabled ? 'Disable notification sound' : 'Enable notification sound'}
+            >
+              {chatSoundEnabled ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M7 10l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                </svg>
+              )}
+            </button>
+          </div>
           
           {/* Chat Messages */}
           {showChat && (
@@ -1958,11 +2050,11 @@ export default function Home() {
         </div>
       )}
       
-      {/* Users List (floating) */}
+      {/* Users List (floating) - positioned above chat on mobile to avoid overlap */}
       {roomId && !showRoomModal && roomUsers.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50">
+        <div className="fixed bottom-28 md:bottom-4 right-2 md:right-4 z-[60]">
           {showUsersList ? (
-            <div className="bg-black/70 backdrop-blur-sm rounded-lg border border-purple-500/30 max-w-xs overflow-hidden">
+            <div className="bg-black/70 backdrop-blur-sm rounded-lg border border-purple-500/30 w-64 md:max-w-xs overflow-hidden">
               <button
                 onClick={() => setShowUsersList(false)}
                 className="w-full flex items-center justify-between p-3 border-b border-purple-500/30 hover:bg-purple-500/10 transition-colors cursor-pointer"
@@ -2014,12 +2106,12 @@ export default function Home() {
           ) : (
             <button
               onClick={() => setShowUsersList(true)}
-              className="w-12 h-12 rounded-full bg-black/70 backdrop-blur-sm border border-purple-500/30 hover:bg-purple-500/20 transition-colors cursor-pointer flex items-center justify-center shadow-lg"
+              className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-black/70 backdrop-blur-sm border border-purple-500/30 hover:bg-purple-500/20 transition-colors cursor-pointer flex items-center justify-center shadow-lg"
               title="Show People in Room"
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
-                className="h-6 w-6 text-gray-300"
+                className="h-5 w-5 md:h-6 md:w-6 text-gray-300"
                 fill="none"
                 viewBox="0 0 24 24"
                 stroke="currentColor"
