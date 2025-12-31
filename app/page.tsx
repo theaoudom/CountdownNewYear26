@@ -168,6 +168,9 @@ export default function Home() {
   const [chatInput, setChatInput] = useState('')
   const [showChat, setShowChat] = useState(true)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+  
+  // Users list state
+  const [showUsersList, setShowUsersList] = useState(true)
 
   // Surprise messages - randomly selected
   const surpriseMessages = [
@@ -476,6 +479,7 @@ export default function Home() {
       if (roomId && userId) {
         leaveRoom(roomId, userId).catch(console.error)
       }
+
     }
   }, [])
   
@@ -1242,22 +1246,46 @@ export default function Home() {
         </div>
       )}
       
+      {/* Standalone Mode Leave Button */}
+      {!roomId && !showRoomModal && (
+        <button
+          onClick={() => setShowRoomModal(true)}
+          className="fixed top-4 right-4 z-50 w-12 h-12 rounded-full bg-red-600/50 hover:bg-red-600 border border-red-500/50 hover:border-red-400 transition-colors cursor-pointer flex items-center justify-center shadow-lg"
+          title="Leave Countdown Alone"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="h-6 w-6 text-white"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M6 18L18 6M6 6l12 12"
+            />
+          </svg>
+        </button>
+      )}
+      
       {/* Chat Panel (bottom left) */}
       {roomId && !showRoomModal && (
         <div className="fixed bottom-4 left-4 z-50 w-80 bg-black/80 backdrop-blur-sm rounded-lg border border-purple-500/30 shadow-2xl flex flex-col max-h-96 overflow-hidden">
           {/* Chat Header */}
-          <div className="flex items-center justify-between p-3 border-b border-purple-500/30">
+          <button
+            onClick={() => setShowChat(!showChat)}
+            className="w-full flex items-center justify-between p-3 border-b border-purple-500/30 hover:bg-purple-500/10 transition-colors cursor-pointer"
+          >
             <div className="flex items-center gap-2">
               <span className="text-lg">💬</span>
               <h3 className="text-sm font-semibold text-white">Room Chat</h3>
             </div>
-            <button
-              onClick={() => setShowChat(!showChat)}
-              className="text-gray-400 hover:text-white transition-colors text-sm"
-            >
+            <span className="text-gray-400 hover:text-white transition-colors text-sm">
               {showChat ? '▼' : '▲'}
-            </button>
-          </div>
+            </span>
+          </button>
           
           {/* Chat Messages */}
           {showChat && (
@@ -1358,43 +1386,79 @@ export default function Home() {
       
       {/* Users List (floating) */}
       {roomId && !showRoomModal && roomUsers.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50 bg-black/70 backdrop-blur-sm rounded-lg p-4 border border-purple-500/30 max-w-xs">
-          <div className="text-sm font-semibold text-gray-300 mb-2">People in Room:</div>
-          <div className="space-y-1 max-h-40 overflow-y-auto">
-            {roomUsers.map((user) => (
-              <div
-                key={user.id}
-                className={`flex items-center justify-between text-sm py-1 px-2 rounded ${
-                  user.id === userId
-                    ? 'bg-purple-600/50 text-purple-200'
-                    : 'text-gray-300'
-                }`}
+        <div className="fixed bottom-4 right-4 z-50">
+          {showUsersList ? (
+            <div className="bg-black/70 backdrop-blur-sm rounded-lg border border-purple-500/30 max-w-xs overflow-hidden">
+              <button
+                onClick={() => setShowUsersList(false)}
+                className="w-full flex items-center justify-between p-3 border-b border-purple-500/30 hover:bg-purple-500/10 transition-colors cursor-pointer"
               >
-                <span>
-                  {user.name} {user.id === userId && '(You)'}
-                  {isHost && user.id === userId && ' 👑'}
+                <div className="text-sm font-semibold text-gray-300">People in Room:</div>
+                <span className="text-gray-400 hover:text-white transition-colors text-sm">
+                  ▼
                 </span>
-                {isHost && user.id !== userId && (
-                  <button
-                    onClick={async () => {
-                      if (roomId && userId) {
-                        try {
-                          await kickUser(roomId, user.id, userId)
-                        } catch (error) {
-                          console.error('Failed to kick user:', error)
-                          setErrorMessage(error instanceof Error ? error.message : 'Failed to kick user')
-                        }
-                      }
-                    }}
-                    className="ml-2 text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/20 transition-colors"
-                    title="Kick user"
-                  >
-                    ✕
-                  </button>
-                )}
+              </button>
+              <div className="p-4">
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {roomUsers.map((user) => (
+                    <div
+                      key={user.id}
+                      className={`flex items-center justify-between text-sm py-1 px-2 rounded ${
+                        user.id === userId
+                          ? 'bg-purple-600/50 text-purple-200'
+                          : 'text-gray-300'
+                      }`}
+                    >
+                      <span>
+                        {user.name} {user.id === userId && '(You)'}
+                        {isHost && user.id === userId && ' 👑'}
+                      </span>
+                      {isHost && user.id !== userId && (
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            if (roomId && userId) {
+                              try {
+                                await kickUser(roomId, user.id, userId)
+                              } catch (error) {
+                                console.error('Failed to kick user:', error)
+                                setErrorMessage(error instanceof Error ? error.message : 'Failed to kick user')
+                              }
+                            }
+                          }}
+                          className="ml-2 text-red-400 hover:text-red-300 text-xs px-2 py-1 rounded hover:bg-red-500/20 transition-colors"
+                          title="Kick user"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowUsersList(true)}
+              className="w-12 h-12 rounded-full bg-black/70 backdrop-blur-sm border border-purple-500/30 hover:bg-purple-500/20 transition-colors cursor-pointer flex items-center justify-center shadow-lg"
+              title="Show People in Room"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-6 w-6 text-gray-300"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                />
+              </svg>
+            </button>
+          )}
         </div>
       )}
       {/* Glowing orbs background - more intense during last minute */}
@@ -1794,4 +1858,5 @@ function TimeUnit({ label, value, intense = false }: { label: string; value: num
     </div>
   )
 }
+
 
