@@ -514,19 +514,31 @@ export default function Home() {
       })
       
       webrtcManagerRef.current.onRemoteStream((userId, stream) => {
+        console.log(`Remote stream received from ${userId}`, stream)
         setRemoteStreams(prev => {
           const newMap = new Map(prev)
           newMap.set(userId, stream)
           return newMap
         })
         
-        // Update video element
-        setTimeout(() => {
+        // Update video element immediately and after a short delay
+        const updateVideoElement = () => {
           const videoElement = remoteVideoRefs.current.get(userId)
           if (videoElement && stream) {
-            videoElement.srcObject = stream
+            if (videoElement.srcObject !== stream) {
+              videoElement.srcObject = stream
+              console.log(`Updated video element for ${userId}`)
+            }
+            // Ensure autoplay
+            videoElement.play().catch(err => {
+              console.warn(`Failed to play video for ${userId}:`, err)
+            })
           }
-        }, 100)
+        }
+        
+        updateVideoElement()
+        setTimeout(updateVideoElement, 100)
+        setTimeout(updateVideoElement, 500)
       })
       
       webrtcManagerRef.current.onRemoteStreamRemoved((userId) => {
@@ -1564,13 +1576,19 @@ export default function Home() {
                         ref={(el) => {
                           if (el) {
                             remoteVideoRefs.current.set(userId, el)
-                            el.srcObject = stream
+                            if (el.srcObject !== stream) {
+                              el.srcObject = stream
+                              el.play().catch(err => {
+                                console.warn(`Failed to play video for ${userId}:`, err)
+                              })
+                            }
                           } else {
                             remoteVideoRefs.current.delete(userId)
                           }
                         }}
                         autoPlay
                         playsInline
+                        muted={false}
                         className="w-full h-full object-cover"
                       />
                       <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-xs text-white">
