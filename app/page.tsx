@@ -77,7 +77,7 @@ export default function Home() {
 
   // TEST MODE: Set to true to test with a date closer to now
   // Change TEST_TARGET_DATE to your desired test date
-  const TEST_MODE = true // Set to false for production (Jan 1, 2026)
+  const TEST_MODE = false // Set to false for production (Jan 1, 2026)
   const TEST_TARGET_DATE = '2025-12-31T10:39:00' // December 31, 2025, 9:33 AM
   
   // Target date: January 1, 2026, 00:00:00 (production)
